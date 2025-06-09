@@ -1,0 +1,165 @@
+#!/bin/bash
+
+cmd="battery"
+work_dir=$(cd "$(dirname "$0")" && pwd)
+settings_file="$work_dir/settings"
+agent_path="$HOME/Library/LaunchAgents"
+agent_name="com.$cmd.agent"
+agent_file="$agent_path/${agent_name}.plist"
+log_file="$work_dir/$cmd.log"
+
+function get_voltage() {
+	voltage=$(ioreg -l -n AppleSmartBattery -r | grep "\"Voltage\" =" | awk '{ print $3/1000 }' | tr ',' '.')
+	echo "$voltage"
+}
+
+function is_charging_enabled() {
+	hex_status=$($work_dir/smc -k CH0B -r | awk '{print $4}' | sed s:\)::)
+	[[ "$hex_status" == "00" ]] && return
+	false
+}
+
+function enable_charging() {
+	echo "🔌🔋 Enabling battery charging"
+	#sudo $work_dir/smc -k CH0B -w 00
+	#sudo $work_dir/smc -k CH0C -w 00
+}
+
+function disable_charging() {
+	echo "🔌🪫 Disabling battery charging"
+	#sudo $work_dir/smc -k CH0B -w 02
+	#sudo $work_dir/smc -k CH0C -w 02
+}
+
+
+function is_valid_voltage() {
+	if [[ ! "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+		echo "Invalid voltage: \"$1\""
+		return 1
+	fi
+	if (($(echo "$1 < 11.1" | bc -l) || $(echo "$1 > 12.6" | bc -l))); then
+		echo "Voltage out of range: ${1}V"
+		return 1
+	fi
+	return 0
+}
+
+function status() {
+	voltage=$(get_voltage)
+	cell_voltage=$(echo "scale=3; $voltage / 3" | bc -l)
+	echo "Current Voltage: ${voltage}V (${cell_voltage}V per cell)"
+	
+	is_charging="no"
+	if is_charging_enabled; then
+		is_charging="yes"
+	fi
+	echo "Charging: $is_charging"
+}
+
+action=$1
+p1=$2
+p2=$3
+
+function is_yes {
+	[[ "$1" == "yes" ]] && return
+	[[ "$1" == "enable" ]] && return
+	[[ "$1" == "1" ]] && return
+	[[ "$1" == "true" ]] && return
+	[[ "$1" == "start" ]] && return
+	false
+}
+
+if [[ "$action" == "status" ]]; then
+	status
+fi
+
+if [[ "$action" == "charge" ]]; then
+	if is_yes $p1 || [[ $p1 == "" ]]; then
+		enable_charging
+	else
+		disable_charging
+	fi
+fi
+
+if [[ "$action" == "set" ]]; then
+	if ! is_valid_voltage "$p1"; then exit 1; fi
+	if ! is_valid_voltage "$p2"; then exit 1; fi
+	if (($(echo "$p1 >= $p2" | bc -l))); then
+		echo "First voltage must be lower than second"
+		exit 1
+	fi
+	
+	echo "$p1 $p2" > $settings_file
+	echo "Set voltage between ${p1}V and ${p2}V and saved to $settings_file"
+fi
+
+function maintain() {
+	echo "Maintaining voltage"
+	touch "$work_dir/test3"
+	while true; do
+		settings=$(cat $settings_file 2>/dev/null)
+		if [[ ! $settings ]]; then
+			echo "No voltage set"
+			exit 1
+		fi
+		
+		u0=$(get_voltage)
+		u1=$(echo $settings | awk '{print $1}')
+		u2=$(echo $settings | awk '{print $2}')		
+		is_charging=$(! is_charging_enabled)$?
+		echo "cur:$u0 min:$u1 max:$u2 chr:$is_charging"
+
+		if (($(echo "$u0 < $u1" | bc -l))) && [ $is_charging = 0 ]; then
+			enable_charging
+		elif (($(echo "$u0 >= $u2" | bc -l))) && [ $is_charging = 1 ]; then
+			disable_charging
+		fi
+		
+		sleep 3
+	done
+}
+
+function install() {
+	agent_definition="
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+	<dict>
+		<key>Label</key>
+		<string>$agent_name</string>
+		<key>ProgramArguments</key>
+		<array>
+			<string>$work_dir/$cmd</string>
+			<string>maintain</string>
+		</array>
+		<key>StandardOutPath</key>
+		<string>$log_file</string>
+		<key>StandardErrorPath</key>
+		<string>$log_file</string>
+		<key>RunAtLoad</key>
+		<true/>
+	</dict>
+</plist>
+"
+	echo $agent_definition
+
+	mkdir -p $agent_path
+	echo "$agent_definition" > "$agent_file"
+	launchctl bootstrap gui/$(id -u $USER) $agent_file
+}
+
+function uninstall() {
+	launchctl bootout gui/$(id -u $USER) $agent_file
+	rm $agent_file 2>/dev/null
+}
+
+if [[ "$action" == "maintain" ]]; then
+	if [[ $p1 == "" ]]; then
+		touch "$work_dir/test2"
+		maintain
+	elif [[ $p1 == "install" ]]; then
+		install
+	elif [[ $p1 == "uninstall" ]]; then
+		uninstall
+	fi
+fi
