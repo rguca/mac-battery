@@ -3,7 +3,7 @@
 cmd="battery"
 work_dir=$(cd "$(dirname "$0")" && pwd)
 settings_file="$work_dir/settings"
-agent_path="$HOME/Library/LaunchAgents"
+agent_path="/Library/LaunchAgents"
 agent_name="com.$cmd.agent"
 agent_file="$agent_path/${agent_name}.plist"
 log_file="$work_dir/$cmd.log"
@@ -21,14 +21,14 @@ function is_charging_enabled() {
 
 function enable_charging() {
 	echo "🔌🔋 Enabling battery charging"
-	#sudo $work_dir/smc -k CH0B -w 00
-	#sudo $work_dir/smc -k CH0C -w 00
+	sudo $work_dir/smc -k CH0B -w 00
+	sudo $work_dir/smc -k CH0C -w 00
 }
 
 function disable_charging() {
 	echo "🔌🪫 Disabling battery charging"
-	#sudo $work_dir/smc -k CH0B -w 02
-	#sudo $work_dir/smc -k CH0C -w 02
+	sudo $work_dir/smc -k CH0B -w 02
+	sudo $work_dir/smc -k CH0C -w 02
 }
 
 
@@ -59,6 +59,13 @@ function status() {
 action=$1
 p1=$2
 p2=$3
+
+function check_if_root {
+	if [[ $(id -u) -ne 0 ]]; then
+    	echo "Not running as root"
+    	exit 1
+	fi
+}
 
 function is_yes {
 	[[ "$1" == "yes" ]] && return
@@ -95,7 +102,6 @@ fi
 
 function maintain() {
 	echo "Maintaining voltage"
-	touch "$work_dir/test3"
 	while true; do
 		settings=$(cat $settings_file 2>/dev/null)
 		if [[ ! $settings ]]; then
@@ -145,17 +151,17 @@ function install() {
 
 	mkdir -p $agent_path
 	echo "$agent_definition" > "$agent_file"
-	launchctl bootstrap gui/$(id -u $USER) $agent_file
+	launchctl bootstrap system $agent_file
 }
 
 function uninstall() {
-	launchctl bootout gui/$(id -u $USER) $agent_file
+	launchctl bootout system $agent_file
 	rm $agent_file 2>/dev/null
 }
 
 if [[ "$action" == "maintain" ]]; then
+	check_if_root
 	if [[ $p1 == "" ]]; then
-		touch "$work_dir/test2"
 		maintain
 	elif [[ $p1 == "install" ]]; then
 		install
