@@ -2,11 +2,25 @@
 
 cmd="battery"
 work_dir=$(cd "$(dirname "$0")" && pwd)
-settings_file="$work_dir/settings"
-agent_path="/Library/LaunchAgents"
+settings_file="/etc/battery"
+agent_dir="/Library/LaunchAgents"
 agent_name="com.$cmd.agent"
-agent_file="$agent_path/${agent_name}.plist"
-log_file="$work_dir/$cmd.log"
+agent_file="$agent_dir/${agent_name}.plist"
+log_file="/var/log/$cmd.log"
+install_dir="/usr/local/bin"
+
+function log() {
+	echo -e "$(date +'%d/%m/%Y %H:%M:%S'): $1"
+}
+
+function is_root() {
+	[[ $(id -u) == 0 ]] && return
+	false
+}
+
+if ! is_root && [[ "$work_dir" != "$install_dir" ]]; then
+	settings_file="$work_dir/settings"
+fi
 
 function get_voltage() {
 	voltage=$(ioreg -l -n AppleSmartBattery -r | grep "\"Voltage\" =" | awk '{ print $3/1000 }' | tr ',' '.')
@@ -20,15 +34,15 @@ function is_charging_enabled() {
 }
 
 function enable_charging() {
-	echo "🔌🔋 Enabling battery charging"
 	sudo $work_dir/smc -k CH0B -w 00
 	sudo $work_dir/smc -k CH0C -w 00
+	log "🔌✅ Enabled battery charging"
 }
 
 function disable_charging() {
-	echo "🔌🪫 Disabling battery charging"
 	sudo $work_dir/smc -k CH0B -w 02
 	sudo $work_dir/smc -k CH0C -w 02
+	log "🔌🚫 Disabled battery charging"
 }
 
 
@@ -46,9 +60,18 @@ function is_valid_voltage() {
 
 function status() {
 	voltage=$(get_voltage)
-	cell_voltage=$(echo "scale=3; $voltage / 3" | bc -l)
-	echo "Current Voltage: ${voltage}V (${cell_voltage}V per cell)"
+	cell_voltage=$(echo "scale=2; $voltage / 3" | bc -l)
+	echo "Current voltage: ${voltage}V (${cell_voltage}V per cell)"
 	
+	settings=$(cat $settings_file 2>/dev/null)
+	if [[ $settings ]]; then
+		u1=$(echo $settings | awk '{print $1}')
+		u2=$(echo $settings | awk '{print $2}')
+		uc1=$(echo "scale=2; $u1 / 3" | bc -l)
+		uc2=$(echo "scale=2; $u2 / 3" | bc -l)
+		echo "Set voltage: ${u1}V-${u2}V (${uc1}V-${uc2}V per cell)"
+	fi
+
 	is_charging="no"
 	if is_charging_enabled; then
 		is_charging="yes"
@@ -61,7 +84,7 @@ p1=$2
 p2=$3
 
 function check_if_root {
-	if [[ $(id -u) -ne 0 ]]; then
+	if ! is_root; then
     	echo "Not running as root"
     	exit 1
 	fi
@@ -80,11 +103,11 @@ if [[ "$action" == "status" ]]; then
 	status
 fi
 
-if [[ "$action" == "charge" ]]; then
-	if is_yes $p1 || [[ $p1 == "" ]]; then
-		enable_charging
+if [[ "$action" == "log" || "$action" == "logs" ]]; then
+	if [[ "$p1" == "-f" ]]; then
+		tail -f $log_file
 	else
-		disable_charging
+		tail $log_file
 	fi
 fi
 
@@ -101,31 +124,54 @@ if [[ "$action" == "set" ]]; then
 fi
 
 function maintain() {
-	echo "Maintaining voltage"
+	> $log_file
+	log "🔧 Maintaining voltage"
+
 	while true; do
 		settings=$(cat $settings_file 2>/dev/null)
 		if [[ ! $settings ]]; then
-			echo "No voltage set"
-			exit 1
+			sleep 5
+			continue
 		fi
 		
 		u0=$(get_voltage)
 		u1=$(echo $settings | awk '{print $1}')
 		u2=$(echo $settings | awk '{print $2}')		
 		is_charging=$(! is_charging_enabled)$?
-		echo "cur:$u0 min:$u1 max:$u2 chr:$is_charging"
+		# echo "cur:$u0 min:$u1 max:$u2 chr:$is_charging"
 
 		if (($(echo "$u0 < $u1" | bc -l))) && [ $is_charging = 0 ]; then
+			log "cur:$u0 < min:$u1"
 			enable_charging
 		elif (($(echo "$u0 >= $u2" | bc -l))) && [ $is_charging = 1 ]; then
+			log "cur:$u0 >= max:$u2"
 			disable_charging
 		fi
 		
-		sleep 3
+		sleep 5
 	done
 }
 
+if [[ "$action" == "charge" ]]; then
+	if [[ "$p1" == "maintain" ]]; then
+		maintain
+	elif is_yes $p1 || [[ $p1 == "" ]]; then
+		enable_charging
+	else
+		disable_charging
+	fi
+fi
+
 function install() {
+	dst_file="$install_dir/$cmd"
+	cp "$work_dir/$cmd" "$work_dir/smc" "$install_dir"
+
+	chmod u=rwx,g=rx,o=rx "$dst_file" "$install_dir/smc"
+	chown root "$dst_file" "$install_dir/smc"
+
+	touch $settings_file
+	chmod 777 $settings_file
+
 	agent_definition="
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
@@ -135,7 +181,8 @@ function install() {
 		<string>$agent_name</string>
 		<key>ProgramArguments</key>
 		<array>
-			<string>$work_dir/$cmd</string>
+			<string>$dst_file</string>
+			<string>charge</string>
 			<string>maintain</string>
 		</array>
 		<key>StandardOutPath</key>
@@ -147,9 +194,8 @@ function install() {
 	</dict>
 </plist>
 "
-	echo $agent_definition
 
-	mkdir -p $agent_path
+	mkdir -p $agent_dir
 	echo "$agent_definition" > "$agent_file"
 	launchctl bootstrap system $agent_file
 }
@@ -157,15 +203,13 @@ function install() {
 function uninstall() {
 	launchctl bootout system $agent_file
 	rm $agent_file 2>/dev/null
+	rm "/usr/local/bin/$cmd" "/usr/local/bin/smc"
 }
 
-if [[ "$action" == "maintain" ]]; then
+if [[ "$action" == "install" ]]; then
 	check_if_root
-	if [[ $p1 == "" ]]; then
-		maintain
-	elif [[ $p1 == "install" ]]; then
-		install
-	elif [[ $p1 == "uninstall" ]]; then
-		uninstall
-	fi
+	install
+elif [[ "$action" == "uninstall" ]]; then
+	check_if_root
+	uninstall
 fi
