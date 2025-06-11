@@ -3,9 +3,9 @@
 cmd="battery"
 work_dir=$(cd "$(dirname "$0")" && pwd)
 settings_file="/etc/battery"
-agent_dir="/Library/LaunchAgents"
-agent_name="com.$cmd.agent"
-agent_file="$agent_dir/${agent_name}.plist"
+daemon_dir="/Library/LaunchDaemons"
+daemon_name="com.$cmd.daemon"
+daemon_file="$daemon_dir/${daemon_name}.plist"
 log_file="/var/log/$cmd.log"
 install_dir="/usr/local/bin"
 
@@ -16,6 +16,10 @@ function log() {
 function is_root() {
 	[[ $(id -u) == 0 ]] && return
 	false
+}
+
+function is_sudo() {
+	sudo -n true 2> /dev/null
 }
 
 if ! is_root && [[ "$work_dir" != "$install_dir" ]]; then
@@ -83,9 +87,9 @@ action=$1
 p1=$2
 p2=$3
 
-function check_if_root {
-	if ! is_root; then
-    	echo "Not running as root"
+function ensure_sudo {
+	sudo -v
+	if ! is_sudo; then
     	exit 1
 	fi
 }
@@ -164,21 +168,21 @@ fi
 
 function install() {
 	dst_file="$install_dir/$cmd"
-	cp "$work_dir/$cmd" "$work_dir/smc" "$install_dir"
+	sudo cp "$work_dir/$cmd" "$work_dir/smc" "$install_dir"
 
-	chmod u=rwx,g=rx,o=rx "$dst_file" "$install_dir/smc"
-	chown root "$dst_file" "$install_dir/smc"
+	sudo chmod u=rwx,g=rx,o=rx "$dst_file" "$install_dir/smc"
+	sudo chown root "$dst_file" "$install_dir/smc"
 
-	touch $settings_file
-	chmod 777 $settings_file
+	sudo touch $settings_file
+	sudo chmod 777 $settings_file
 
-	agent_definition="
+	daemon_definition="
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 	<dict>
 		<key>Label</key>
-		<string>$agent_name</string>
+		<string>$daemon_name</string>
 		<key>ProgramArguments</key>
 		<array>
 			<string>$dst_file</string>
@@ -195,21 +199,22 @@ function install() {
 </plist>
 "
 
-	mkdir -p $agent_dir
-	echo "$agent_definition" > "$agent_file"
-	launchctl bootstrap system $agent_file
+	sudo mkdir -p $daemon_dir
+	echo "$daemon_definition" | sudo tee "$daemon_file" > /dev/null
+	sudo launchctl bootstrap system $daemon_file
+	sudo launchctl enable system/$daemon_name
 }
 
 function uninstall() {
-	launchctl bootout system $agent_file
-	rm $agent_file 2>/dev/null
-	rm "/usr/local/bin/$cmd" "/usr/local/bin/smc"
+	sudo launchctl bootout system $daemon_file
+	sudo rm $daemon_file 2>/dev/null
+	sudo rm "/usr/local/bin/$cmd" "/usr/local/bin/smc"
 }
 
 if [[ "$action" == "install" ]]; then
-	check_if_root
+	ensure_sudo
 	install
 elif [[ "$action" == "uninstall" ]]; then
-	check_if_root
+	ensure_sudo
 	uninstall
 fi
