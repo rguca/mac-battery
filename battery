@@ -31,21 +31,39 @@ function get_voltage() {
 	echo "$voltage"
 }
 
+function smc_read_hex() {
+	key=$1
+	line=$(echo $($work_dir/smc -k $key -r))
+	if [[ $line =~ "no data" ]]; then
+		echo
+	else
+		echo ${line#*bytes} | tr -d ' ' | tr -d ')'
+	fi
+}
+
+function smc_write_hex() {
+	local key=$1
+	local hex_value=$2
+	if ! sudo $work_dir/smc -k "$key" -w "$hex_value" >/dev/null 2>&1; then
+		log "⚠️ Failed to write $hex_value to $key"
+		return 1
+	fi
+	return 0
+}
+
 function is_charging_enabled() {
-	hex_status=$($work_dir/smc -k CH0B -r | awk '{print $4}' | sed s:\)::)
-	[[ "$hex_status" == "00" ]] && return
+	hex_status=$(smc_read_hex "CHTE")
+	[[ "$hex_status" == "00000000" ]] && return
 	false
 }
 
 function enable_charging() {
-	sudo $work_dir/smc -k CH0B -w 00
-	sudo $work_dir/smc -k CH0C -w 00
+	smc_write_hex CHTE 00000000
 	log "🔌✅ Enabled battery charging"
 }
 
 function disable_charging() {
-	sudo $work_dir/smc -k CH0B -w 02
-	sudo $work_dir/smc -k CH0C -w 02
+	smc_write_hex CHTE 01000000
 	log "🔌🚫 Disabled battery charging"
 }
 
@@ -96,6 +114,7 @@ function ensure_sudo {
 
 function is_yes {
 	[[ "$1" == "yes" ]] && return
+	[[ "$1" == "on" ]] && return
 	[[ "$1" == "enable" ]] && return
 	[[ "$1" == "1" ]] && return
 	[[ "$1" == "true" ]] && return
@@ -127,7 +146,7 @@ if [[ "$action" == "set" ]]; then
 	echo "Set voltage between ${p1}V and ${p2}V and saved to $settings_file"
 fi
 
-function maintain() {
+if [[ "$action" == "daemon_maintain" ]]; then
 	> $log_file
 	log "🔧 Maintaining voltage"
 
@@ -154,14 +173,17 @@ function maintain() {
 		
 		sleep 5
 	done
-}
+fi
 
 if [[ "$action" == "charge" ]]; then
 	if [[ "$p1" == "maintain" ]]; then
-		maintain
+		sudo launchctl start $daemon_name
+		log "🔧 Maintaining voltage"
 	elif is_yes $p1 || [[ $p1 == "" ]]; then
+		sudo launchctl stop $daemon_name
 		enable_charging
 	else
+		sudo launchctl stop $daemon_name
 		disable_charging
 	fi
 fi
@@ -186,8 +208,7 @@ function install() {
 		<key>ProgramArguments</key>
 		<array>
 			<string>$dst_file</string>
-			<string>charge</string>
-			<string>maintain</string>
+			<string>daemon_maintain</string>
 		</array>
 		<key>StandardOutPath</key>
 		<string>$log_file</string>
@@ -203,6 +224,8 @@ function install() {
 	echo "$daemon_definition" | sudo tee "$daemon_file" > /dev/null
 	sudo launchctl bootstrap system $daemon_file
 	sudo launchctl enable system/$daemon_name
+	
+	echo "Installed service: $daemon_name"
 }
 
 function uninstall() {
